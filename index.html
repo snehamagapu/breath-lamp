@@ -1,0 +1,494 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<meta name="robots" content="noindex, nofollow">
+<title>The Lamp — a breath practice</title>
+<style>
+  :root {
+    --ink: #f3e9d8;
+    --dim: #9b8a72;
+    --accent: #e8a24a;
+  }
+  * { margin: 0; padding: 0; box-sizing: border-box; }
+  html, body { height: 100%; overflow: hidden; }
+  body {
+    background: #050308;
+    color: var(--ink);
+    font-family: Georgia, 'Times New Roman', serif;
+    -webkit-tap-highlight-color: transparent;
+    user-select: none;
+    -webkit-user-select: none;
+  }
+  #scene { position: fixed; inset: 0; display: block; }
+
+  .overlay {
+    position: fixed; inset: 0; z-index: 10;
+    display: flex; flex-direction: column; align-items: center; justify-content: center;
+    text-align: center; padding: 32px 24px;
+    background: radial-gradient(ellipse at 50% 60%, rgba(30,14,6,.92), rgba(5,3,8,.97));
+    transition: opacity 1.2s ease;
+  }
+  .overlay.hidden { opacity: 0; pointer-events: none; }
+  h1 { font-size: 2.1rem; font-weight: normal; letter-spacing: .12em; margin-bottom: 10px; }
+  .sub { color: var(--dim); font-size: .95rem; max-width: 30em; line-height: 1.6; margin-bottom: 34px; }
+  .btn {
+    font-family: inherit; font-size: 1rem; letter-spacing: .06em;
+    color: var(--ink); background: rgba(232,162,74,.12);
+    border: 1px solid rgba(232,162,74,.55); border-radius: 999px;
+    padding: 13px 30px; margin: 6px; cursor: pointer;
+  }
+  .btn:active { background: rgba(232,162,74,.28); }
+  .btn.ghost { border-color: rgba(155,138,114,.4); background: transparent; color: var(--dim); font-size: .85rem; padding: 10px 22px; }
+
+  #status {
+    position: fixed; left: 0; right: 0; bottom: 12vh; z-index: 5;
+    text-align: center; color: var(--dim); font-size: .95rem; letter-spacing: .05em;
+    padding: 0 24px; transition: opacity 1s ease; line-height: 1.5;
+  }
+  #hud {
+    position: fixed; top: calc(12px + env(safe-area-inset-top)); left: 16px; right: 16px; z-index: 5;
+    display: flex; justify-content: space-between; align-items: baseline;
+    color: var(--dim); font-size: .85rem; letter-spacing: .08em;
+    opacity: 0; transition: opacity 1s ease;
+  }
+  #hud.on { opacity: .8; }
+  #gear {
+    background: none; border: none; color: var(--dim); font-size: 1.1rem; cursor: pointer;
+    padding: 4px 8px; font-family: inherit;
+  }
+
+  #debug {
+    position: fixed; left: 0; right: 0; bottom: 0; z-index: 20;
+    background: rgba(8,5,10,.94); border-top: 1px solid rgba(232,162,74,.3);
+    padding: 12px 16px calc(12px + env(safe-area-inset-bottom));
+    font-family: Consolas, Menlo, monospace; font-size: 11px; color: #b8a88e;
+    display: none;
+  }
+  #debug.on { display: block; }
+  #meter { width: 100%; height: 64px; display: block; background: #0c0810; border-radius: 4px; }
+  #debug .row { display: flex; flex-wrap: wrap; gap: 8px 16px; align-items: center; margin-top: 8px; }
+  #debug label { display: flex; align-items: center; gap: 6px; }
+  #debug input[type=range] { width: 110px; }
+  #debug button {
+    font-family: inherit; font-size: 11px; color: #d8c8a8;
+    background: rgba(232,162,74,.1); border: 1px solid rgba(232,162,74,.35);
+    border-radius: 4px; padding: 5px 10px; cursor: pointer;
+  }
+  #stats { margin-top: 6px; white-space: pre; line-height: 1.5; }
+</style>
+</head>
+<body>
+<canvas id="scene"></canvas>
+
+<div id="hud">
+  <span id="hud-left">0:00 · 0 breaths</span>
+  <button id="gear" aria-label="debug">⚙</button>
+</div>
+
+<div id="status"></div>
+
+<div class="overlay" id="intro">
+  <h1>The Lamp</h1>
+  <p class="sub">A flame that lives on your breath.<br>
+  Sit comfortably, hold the lamp near — as you would a diya —<br>
+  and breathe out slowly toward it.</p>
+  <button class="btn" id="begin-mic">Begin</button>
+  <button class="btn ghost" id="begin-paced">Begin without microphone</button>
+</div>
+
+<div id="debug">
+  <canvas id="meter"></canvas>
+  <div class="row">
+    <label>threshold ×<span id="mult-val">4.0</span>
+      <input type="range" id="mult" min="1.5" max="10" step="0.25" value="4">
+    </label>
+    <button id="recal">recalibrate</button>
+    <button id="simbtn">hold to breathe (or hold Space)</button>
+  </div>
+  <div id="stats"></div>
+</div>
+
+<script>
+'use strict';
+
+/* ---------- state ---------- */
+const S = {
+  mode: 'intro',            // intro | calibrating | active
+  paced: false,
+  rms: 0, env: 0,
+  floor: 0.0006, sd: 0.0004, mult: 4,
+  breath: 'idle',           // idle | exhale
+  aboveSince: null, lastAbove: 0, breathStart: 0,
+  breathLevel: 0,           // 0..1, drives the flame swell
+  calm: 0,                  // 0..1, accumulates with steady breathing
+  agitation: 0,             // 0..1, spikes on sudden noise
+  breaths: 0,
+  sessionStart: 0,
+  simHold: false, simT: 0,
+  calSamples: [], calEnd: 0,
+};
+const on  = () => Math.max(S.floor * 2.2, S.floor + S.mult * S.sd, 0.0012);
+const off = () => S.floor + (on() - S.floor) * 0.45;
+
+/* ---------- dom ---------- */
+const $ = id => document.getElementById(id);
+const scene = $('scene'), sctx = scene.getContext('2d');
+const meter = $('meter'), mctx = meter.getContext('2d');
+const statusEl = $('status'), hud = $('hud'), hudLeft = $('hud-left');
+
+let W = 0, H = 0, DPR = 1;
+function resize() {
+  DPR = Math.min(window.devicePixelRatio || 1, 2);
+  W = window.innerWidth; H = window.innerHeight;
+  scene.width = W * DPR; scene.height = H * DPR;
+  sctx.setTransform(DPR, 0, 0, DPR, 0, 0);
+  const mw = meter.clientWidth || 300;
+  meter.width = mw * DPR; meter.height = 64 * DPR;
+  mctx.setTransform(DPR, 0, 0, DPR, 0, 0);
+}
+window.addEventListener('resize', resize);
+resize();
+
+/* ---------- stars (the reveal) ---------- */
+const stars = [];
+(function () {
+  let seed = 7;
+  const rnd = () => (seed = (seed * 16807) % 2147483647) / 2147483647;
+  for (let i = 0; i < 130; i++) {
+    stars.push({
+      x: rnd(), y: rnd() * 0.62,
+      r: 0.5 + rnd() * 1.3,
+      tw: rnd() * 6.28, tws: 0.3 + rnd() * 0.8,
+      rank: i / 130,
+    });
+  }
+})();
+
+/* ---------- audio ---------- */
+let audioCtx = null, analyser = null, buf = null;
+
+async function initMic() {
+  const stream = await navigator.mediaDevices.getUserMedia({
+    audio: { echoCancellation: false, noiseSuppression: false, autoGainControl: false }
+  });
+  audioCtx = new (window.AudioContext || window.webkitAudioContext)();
+  await audioCtx.resume();
+  const src = audioCtx.createMediaStreamSource(stream);
+  const hp = audioCtx.createBiquadFilter(); hp.type = 'highpass'; hp.frequency.value = 180;
+  const lp = audioCtx.createBiquadFilter(); lp.type = 'lowpass'; lp.frequency.value = 2200;
+  analyser = audioCtx.createAnalyser(); analyser.fftSize = 2048;
+  src.connect(hp); hp.connect(lp); lp.connect(analyser);
+  buf = new Float32Array(analyser.fftSize);
+}
+
+function readRms(dt) {
+  let rms = 0;
+  if (analyser) {
+    analyser.getFloatTimeDomainData(buf);
+    let sum = 0;
+    for (let i = 0; i < buf.length; i++) sum += buf[i] * buf[i];
+    rms = Math.sqrt(sum / buf.length);
+  }
+  // synthetic exhale (debug button / Space) rides on top of the real signal
+  if (S.simHold) {
+    S.simT = Math.min(1, S.simT + dt / 0.6);
+  } else {
+    S.simT = Math.max(0, S.simT - dt / 0.4);
+  }
+  if (S.simT > 0) {
+    const target = Math.max(on() * 3, 0.02);
+    rms = Math.max(rms, target * S.simT);
+  }
+  S.rms = rms;
+  // envelope follower: fast attack, slow release
+  const k = rms > S.env ? Math.min(1, dt * 14) : Math.min(1, dt * 3.2);
+  S.env += (rms - S.env) * k;
+}
+
+/* ---------- calibration ---------- */
+function startCalibration() {
+  S.mode = 'calibrating';
+  S.calSamples = [];
+  S.calEnd = performance.now() / 1000 + 6;
+  setStatus('Sit quietly — listening to the room…');
+}
+function finishCalibration() {
+  const a = S.calSamples;
+  if (a.length > 10) {
+    const mean = a.reduce((s, v) => s + v, 0) / a.length;
+    const sd = Math.sqrt(a.reduce((s, v) => s + (v - mean) ** 2, 0) / a.length);
+    S.floor = mean; S.sd = Math.max(sd, mean * 0.15);
+  }
+  S.mode = 'active';
+  S.sessionStart = performance.now() / 1000;
+  S.calm = 0; S.breaths = 0;
+  hud.classList.add('on');
+  setStatus('Breathe out, slow and long, toward the flame.', 6);
+}
+
+/* ---------- breath state machine ---------- */
+function updateBreath(now) {
+  const env = S.env, ON = on(), OFF = off();
+
+  if (env > ON) {
+    if (S.aboveSince === null) S.aboveSince = now;
+    S.lastAbove = now;
+    if (S.breath === 'idle' && now - S.aboveSince >= 0.25) {
+      S.breath = 'exhale';
+      S.breathStart = S.aboveSince;
+    }
+  } else if (env < OFF) {
+    S.aboveSince = null;
+    if (S.breath === 'exhale' && now - S.lastAbove > 0.45) {
+      const dur = S.lastAbove - S.breathStart;
+      S.breath = 'idle';
+      if (dur >= 1.2) {
+        S.breaths++;
+        S.calm = Math.min(1, S.calm + 0.09 * Math.min(1, (dur - 0.8) / 4.5));
+      } else if (dur < 0.6) {
+        S.calm = Math.max(0, S.calm - 0.05);      // short blip: speech / noise
+        S.agitation = Math.min(1, S.agitation + 0.35);
+      }
+    }
+  }
+  // loud impulse (clap, loud speech) → gutter
+  if (S.rms > ON * 5 && S.rms > S.env * 2.5) {
+    S.agitation = Math.min(1, S.agitation + 0.25);
+  }
+
+  // flame drive level
+  let target;
+  if (S.paced) {
+    // 10 s cycle: 4 s in (flame settles), 6 s out (flame rises)
+    const ph = ((now - S.sessionStart) % 10) / 10;
+    target = ph < 0.4 ? 0.08 : Math.pow(Math.sin((ph - 0.4) / 0.6 * Math.PI), 1.2);
+  } else {
+    target = Math.min(1, Math.max(0, (env - OFF) / (ON * 2.5 - OFF)));
+  }
+  const k = target > S.breathLevel ? 0.10 : 0.035;
+  S.breathLevel += (target - S.breathLevel) * k;
+}
+
+/* ---------- flame rendering ---------- */
+const noise1 = t => Math.sin(t * 1.7) * 0.55 + Math.sin(t * 3.83 + 1.3) * 0.28 + Math.sin(t * 9.2 + 4.1) * 0.17;
+
+function flamePath(cx, baseY, w, h, tipX) {
+  sctx.beginPath();
+  sctx.moveTo(cx - w / 2, baseY);
+  sctx.bezierCurveTo(cx - w / 2, baseY - h * 0.38, cx - w * 0.30 + tipX * 0.4, baseY - h * 0.74, cx + tipX, baseY - h);
+  sctx.bezierCurveTo(cx + w * 0.30 + tipX * 0.4, baseY - h * 0.74, cx + w / 2, baseY - h * 0.38, cx + w / 2, baseY);
+  sctx.closePath();
+}
+
+function draw(t) {
+  if (W !== window.innerWidth || H !== window.innerHeight) resize();
+  sctx.fillStyle = '#050308';
+  sctx.fillRect(0, 0, W, H);
+
+  const active = S.mode === 'active';
+  const calm = S.calm;
+
+  // stars fade in with accumulated calm
+  if (active && calm > 0.02) {
+    for (const s of stars) {
+      const vis = Math.min(1, Math.max(0, (calm - s.rank * 0.9) * 6));
+      if (vis <= 0) continue;
+      const twinkle = 0.65 + 0.35 * Math.sin(t * s.tws + s.tw);
+      sctx.fillStyle = `rgba(240,230,210,${(0.55 * vis * twinkle).toFixed(3)})`;
+      sctx.beginPath();
+      sctx.arc(s.x * W, s.y * H, s.r, 0, 6.283);
+      sctx.fill();
+    }
+  }
+
+  const cx = W / 2, baseY = H * 0.70;
+  const energy = 0.5 + S.breathLevel * 0.5;               // 0.5 .. 1
+  const flick = (1 - calm * 0.65) * (0.6 + S.agitation * 1.8);
+  const hBase = Math.min(H * 0.17, 150) * (0.72 + energy * 0.55);
+  const sway = noise1(t * 2.2) * 9 * flick + noise1(t * 0.7) * 3;
+  const hJit = 1 + noise1(t * 4.4 + 7) * 0.10 * flick
+                 - S.agitation * 0.35 * Math.max(0, noise1(t * 12));
+  const h = hBase * hJit;
+  const w = h * 0.38;
+
+  // ambient glow
+  const glowR = h * 3.2;
+  const g = sctx.createRadialGradient(cx, baseY - h * 0.45, 0, cx, baseY - h * 0.45, glowR);
+  g.addColorStop(0, `rgba(255,150,50,${0.22 + energy * 0.20})`);
+  g.addColorStop(0.5, `rgba(180,70,20,${0.08 + energy * 0.07})`);
+  g.addColorStop(1, 'rgba(0,0,0,0)');
+  sctx.fillStyle = g;
+  sctx.fillRect(cx - glowR, baseY - h * 0.45 - glowR, glowR * 2, glowR * 2);
+
+  // flame layers
+  sctx.save();
+  sctx.globalCompositeOperation = 'lighter';
+  const layers = [
+    { hs: 1.00, ws: 1.00, c: `rgba(255,105,18,${0.50 + energy * 0.2})` },
+    { hs: 0.74, ws: 0.68, c: `rgba(255,175,45,${0.60 + energy * 0.25})` },
+    { hs: 0.48, ws: 0.42, c: `rgba(255,238,190,${0.75 + energy * 0.25})` },
+  ];
+  for (const L of layers) {
+    flamePath(cx, baseY, w * L.ws, h * L.hs, sway * (0.4 + L.hs * 0.6));
+    sctx.fillStyle = L.c;
+    sctx.fill();
+  }
+  // blue base
+  sctx.fillStyle = 'rgba(90,130,255,0.35)';
+  sctx.beginPath();
+  sctx.ellipse(cx, baseY - h * 0.05, w * 0.30, h * 0.10, 0, 0, 6.283);
+  sctx.fill();
+  sctx.restore();
+
+  // wick + diya bowl
+  sctx.strokeStyle = '#1a0d08';
+  sctx.lineWidth = 3;
+  sctx.beginPath();
+  sctx.moveTo(cx, baseY + 2);
+  sctx.lineTo(cx, baseY - 8);
+  sctx.stroke();
+
+  sctx.fillStyle = '#241109';
+  sctx.beginPath();
+  sctx.moveTo(cx - h * 0.62, baseY + 2);
+  sctx.quadraticCurveTo(cx, baseY + h * 0.42, cx + h * 0.62, baseY + 2);
+  sctx.closePath();
+  sctx.fill();
+  sctx.strokeStyle = 'rgba(163,15,10,0.55)';
+  sctx.lineWidth = 1.5;
+  sctx.beginPath();
+  sctx.moveTo(cx - h * 0.62, baseY + 2);
+  sctx.lineTo(cx + h * 0.62, baseY + 2);
+  sctx.stroke();
+}
+
+/* ---------- debug meter ---------- */
+const hist = new Float32Array(720);
+let histI = 0;
+function drawMeter() {
+  hist[histI] = S.env; histI = (histI + 1) % hist.length;
+  const mw = meter.width / DPR, mh = meter.height / DPR;
+  const scale = Math.max(on() * 4, 0.004);
+  mctx.fillStyle = '#0c0810';
+  mctx.fillRect(0, 0, mw, mh);
+  const line = (v, c) => {
+    mctx.strokeStyle = c;
+    mctx.beginPath();
+    const y = mh - Math.min(1, v / scale) * mh;
+    mctx.moveTo(0, y); mctx.lineTo(mw, y);
+    mctx.stroke();
+  };
+  line(S.floor, 'rgba(120,120,160,0.5)');
+  line(on(), 'rgba(232,100,74,0.8)');
+  line(off(), 'rgba(232,162,74,0.4)');
+  mctx.strokeStyle = '#e8d8a0';
+  mctx.beginPath();
+  for (let i = 0; i < hist.length; i++) {
+    const v = hist[(histI + i) % hist.length];
+    const x = i / hist.length * mw;
+    const y = mh - Math.min(1, v / scale) * mh;
+    i ? mctx.lineTo(x, y) : mctx.moveTo(x, y);
+  }
+  mctx.stroke();
+  $('stats').textContent =
+    `rms ${S.rms.toFixed(5)}  env ${S.env.toFixed(5)}  floor ${S.floor.toFixed(5)}\n` +
+    `on ${on().toFixed(5)}  off ${off().toFixed(5)}  state ${S.paced ? 'paced' : S.breath}\n` +
+    `calm ${S.calm.toFixed(2)}  agit ${S.agitation.toFixed(2)}  breaths ${S.breaths}`;
+}
+
+/* ---------- status / hud ---------- */
+let statusTimer = null;
+function setStatus(msg, fadeAfter) {
+  statusEl.textContent = msg;
+  statusEl.style.opacity = 1;
+  if (statusTimer) clearTimeout(statusTimer);
+  if (fadeAfter) statusTimer = setTimeout(() => { statusEl.style.opacity = 0; }, fadeAfter * 1000);
+}
+
+/* ---------- main loop ---------- */
+let lastT = performance.now() / 1000;
+function step(now, dt) {
+  readRms(dt);
+
+  if (S.mode === 'calibrating') {
+    S.calSamples.push(S.env);
+    const left = S.calEnd - now;
+    if (left <= 0) finishCalibration();
+    else setStatus(`Sit quietly — listening to the room… ${Math.ceil(left)}`);
+  } else if (S.mode === 'active') {
+    updateBreath(now);
+    S.agitation *= Math.pow(0.5, dt / 1.2);
+    S.calm = Math.max(0, S.calm - dt * 0.0025);
+    if (S.paced) {
+      const cyc = Math.floor((now - S.sessionStart) / 10);
+      if (cyc > S.breaths) { S.breaths = cyc; S.calm = Math.min(1, S.calm + 0.05); }
+    }
+    const el = Math.floor(now - S.sessionStart);
+    hudLeft.textContent =
+      `${Math.floor(el / 60)}:${String(el % 60).padStart(2, '0')} · ${S.breaths} breath${S.breaths === 1 ? '' : 's'}`;
+  }
+
+  draw(now);
+  if ($('debug').classList.contains('on')) drawMeter();
+}
+function frame() {
+  const now = performance.now() / 1000;
+  const dt = Math.min(0.05, now - lastT);
+  lastT = now;
+  step(now, dt);
+  requestAnimationFrame(frame);
+}
+requestAnimationFrame(frame);
+
+/* ---------- session start ---------- */
+async function begin(withMic) {
+  $('intro').classList.add('hidden');
+  let micOk = false;
+  if (withMic) {
+    setStatus('Waiting for microphone permission…');
+    try { await initMic(); micOk = true; }
+    catch (e) { console.warn('mic unavailable:', e.message || e); }
+  }
+  if (micOk) {
+    startCalibration();
+  } else {
+    S.paced = true;
+    S.mode = 'active';
+    S.sessionStart = performance.now() / 1000;
+    hud.classList.add('on');
+    setStatus(withMic
+      ? 'Microphone unavailable — the flame will pace you instead. Breathe with it: out as it rises.'
+      : 'The flame will pace you. Breathe with it: out as it rises, in as it settles.', 8);
+  }
+  try {
+    if (navigator.wakeLock) await navigator.wakeLock.request('screen');
+  } catch (e) { /* wake lock is best-effort */ }
+}
+
+$('begin-mic').addEventListener('click', () => begin(true));
+$('begin-paced').addEventListener('click', () => begin(false));
+
+/* ---------- debug wiring ---------- */
+$('gear').addEventListener('click', () => { $('debug').classList.toggle('on'); resize(); });
+$('mult').addEventListener('input', e => {
+  S.mult = parseFloat(e.target.value);
+  $('mult-val').textContent = S.mult.toFixed(1);
+});
+$('recal').addEventListener('click', () => { if (!S.paced) startCalibration(); });
+
+const simBtn = $('simbtn');
+const simOn = e => { e.preventDefault(); S.simHold = true; };
+const simOff = () => { S.simHold = false; };
+simBtn.addEventListener('pointerdown', simOn);
+simBtn.addEventListener('pointerup', simOff);
+simBtn.addEventListener('pointerleave', simOff);
+window.addEventListener('keydown', e => { if (e.code === 'Space') { e.preventDefault(); S.simHold = true; } });
+window.addEventListener('keyup', e => { if (e.code === 'Space') S.simHold = false; });
+
+/* test hook */
+window.__lamp = { S, step, simBreath: v => { S.simHold = !!v; } };
+</script>
+</body>
+</html>
