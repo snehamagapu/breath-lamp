@@ -21,8 +21,9 @@
     user-select: none;
     -webkit-user-select: none;
   }
-  /* top/right/bottom/left instead of inset: old iOS Safari lacks inset,
-     which left the canvas unscaled and the flame drawn off-screen */
+  /* canvas is a replaced element: pinning all four edges does NOT stretch it,
+     it stays at intrinsic (attribute) size — 2x the screen on DPR-2 phones,
+     pushing the flame off-screen. resize() sets style.width/height explicitly. */
   #scene { position: fixed; top: 0; left: 0; display: block; }
 
   .overlay {
