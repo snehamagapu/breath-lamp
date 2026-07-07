@@ -21,10 +21,12 @@
     user-select: none;
     -webkit-user-select: none;
   }
-  #scene { position: fixed; inset: 0; display: block; }
+  /* top/right/bottom/left instead of inset: old iOS Safari lacks inset,
+     which left the canvas unscaled and the flame drawn off-screen */
+  #scene { position: fixed; top: 0; left: 0; display: block; }
 
   .overlay {
-    position: fixed; inset: 0; z-index: 10;
+    position: fixed; top: 0; right: 0; bottom: 0; left: 0; z-index: 10;
     display: flex; flex-direction: column; align-items: center; justify-content: center;
     text-align: center; padding: 32px 24px;
     background: radial-gradient(ellipse at 50% 60%, rgba(30,14,6,.92), rgba(5,3,8,.97));
@@ -94,7 +96,7 @@
   <p class="sub">A flame that lives on your breath.<br>
   Sit comfortably, hold the lamp near — as you would a diya —<br>
   and breathe out slowly toward it.<br>
-  <span style="opacity:.45;font-size:.8em">build 2</span></p>
+  <span style="opacity:.45;font-size:.8em">build 3</span></p>
   <button class="btn" id="begin-mic">Begin</button>
   <button class="btn ghost" id="begin-paced">Begin without microphone</button>
 </div>
@@ -125,7 +127,7 @@ window.addEventListener('unhandledrejection', function (e) {
   if (el) { el.textContent = '⚠ ' + m; el.style.opacity = 1; }
 });
 
-const BUILD = 2;
+const BUILD = 3;
 
 /* ---------- state ---------- */
 const S = {
@@ -158,6 +160,7 @@ function resize() {
   DPR = Math.min(window.devicePixelRatio || 1, 2);
   W = window.innerWidth; H = window.innerHeight;
   scene.width = W * DPR; scene.height = H * DPR;
+  scene.style.width = W + 'px'; scene.style.height = H + 'px';
   sctx.setTransform(DPR, 0, 0, DPR, 0, 0);
   const mw = meter.clientWidth || 300;
   meter.width = mw * DPR; meter.height = 64 * DPR;
@@ -419,7 +422,11 @@ function drawMeter() {
     `rms ${S.rms.toFixed(5)}  env ${S.env.toFixed(5)}  floor ${S.floor.toFixed(5)}\n` +
     `on ${on().toFixed(5)}  off ${off().toFixed(5)}  state ${S.paced ? 'paced' : S.breath}\n` +
     `calm ${S.calm.toFixed(2)}  agit ${S.agitation.toFixed(2)}  breaths ${S.breaths}\n` +
-    `build ${BUILD}  audio ${audioCtx ? audioCtx.state : 'none'}${analyser ? (useByte ? ' (byte)' : ' (float)') : ''}  maxEnv ${S.maxEnv.toFixed(5)}`;
+    `build ${BUILD}  audio ${audioCtx ? audioCtx.state : 'none'}${analyser ? (useByte ? ' (byte)' : ' (float)') : ''}  maxEnv ${S.maxEnv.toFixed(5)}\n` +
+    (() => {
+      const r = scene.getBoundingClientRect();
+      return `canvas ${scene.width}×${scene.height}  css ${Math.round(r.width)}×${Math.round(r.height)} @ ${Math.round(r.left)},${Math.round(r.top)}  win ${window.innerWidth}×${window.innerHeight}`;
+    })();
 }
 
 /* ---------- status / hud ---------- */
