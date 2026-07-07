@@ -93,7 +93,8 @@
   <h1>The Lamp</h1>
   <p class="sub">A flame that lives on your breath.<br>
   Sit comfortably, hold the lamp near — as you would a diya —<br>
-  and breathe out slowly toward it.</p>
+  and breathe out slowly toward it.<br>
+  <span style="opacity:.45;font-size:.8em">build 2</span></p>
   <button class="btn" id="begin-mic">Begin</button>
   <button class="btn ghost" id="begin-paced">Begin without microphone</button>
 </div>
@@ -113,6 +114,19 @@
 <script>
 'use strict';
 
+/* surface any runtime error on screen — phones have no visible console */
+window.addEventListener('error', function (e) {
+  var el = document.getElementById('status');
+  if (el) { el.textContent = '⚠ ' + e.message; el.style.opacity = 1; }
+});
+window.addEventListener('unhandledrejection', function (e) {
+  var el = document.getElementById('status');
+  var m = (e.reason && e.reason.message) || String(e.reason);
+  if (el) { el.textContent = '⚠ ' + m; el.style.opacity = 1; }
+});
+
+const BUILD = 2;
+
 /* ---------- state ---------- */
 const S = {
   mode: 'intro',            // intro | calibrating | active
@@ -128,6 +142,7 @@ const S = {
   sessionStart: 0,
   simHold: false, simT: 0,
   calSamples: [], calEnd: 0,
+  maxEnv: 0, micHintShown: false,
 };
 const on  = () => Math.max(S.floor * 2.2, S.floor + S.mult * S.sd, 0.0012);
 const off = () => S.floor + (on() - S.floor) * 0.45;
@@ -167,28 +182,36 @@ const stars = [];
 })();
 
 /* ---------- audio ---------- */
-let audioCtx = null, analyser = null, buf = null;
+let audioCtx = null, analyser = null, buf = null, useByte = false;
 
 async function initMic() {
   const stream = await navigator.mediaDevices.getUserMedia({
     audio: { echoCancellation: false, noiseSuppression: false, autoGainControl: false }
   });
-  audioCtx = new (window.AudioContext || window.webkitAudioContext)();
+  // audioCtx is normally created synchronously in the tap gesture (see begin);
+  // this is the fallback path
+  if (!audioCtx) audioCtx = new (window.AudioContext || window.webkitAudioContext)();
   await audioCtx.resume();
   const src = audioCtx.createMediaStreamSource(stream);
   const hp = audioCtx.createBiquadFilter(); hp.type = 'highpass'; hp.frequency.value = 180;
   const lp = audioCtx.createBiquadFilter(); lp.type = 'lowpass'; lp.frequency.value = 2200;
   analyser = audioCtx.createAnalyser(); analyser.fftSize = 2048;
   src.connect(hp); hp.connect(lp); lp.connect(analyser);
-  buf = new Float32Array(analyser.fftSize);
+  useByte = typeof analyser.getFloatTimeDomainData !== 'function';   // older iOS Safari
+  buf = useByte ? new Uint8Array(analyser.fftSize) : new Float32Array(analyser.fftSize);
 }
 
 function readRms(dt) {
   let rms = 0;
   if (analyser) {
-    analyser.getFloatTimeDomainData(buf);
     let sum = 0;
-    for (let i = 0; i < buf.length; i++) sum += buf[i] * buf[i];
+    if (useByte) {
+      analyser.getByteTimeDomainData(buf);
+      for (let i = 0; i < buf.length; i++) { const v = (buf[i] - 128) / 128; sum += v * v; }
+    } else {
+      analyser.getFloatTimeDomainData(buf);
+      for (let i = 0; i < buf.length; i++) sum += buf[i] * buf[i];
+    }
     rms = Math.sqrt(sum / buf.length);
   }
   // synthetic exhale (debug button / Space) rides on top of the real signal
@@ -395,7 +418,8 @@ function drawMeter() {
   $('stats').textContent =
     `rms ${S.rms.toFixed(5)}  env ${S.env.toFixed(5)}  floor ${S.floor.toFixed(5)}\n` +
     `on ${on().toFixed(5)}  off ${off().toFixed(5)}  state ${S.paced ? 'paced' : S.breath}\n` +
-    `calm ${S.calm.toFixed(2)}  agit ${S.agitation.toFixed(2)}  breaths ${S.breaths}`;
+    `calm ${S.calm.toFixed(2)}  agit ${S.agitation.toFixed(2)}  breaths ${S.breaths}\n` +
+    `build ${BUILD}  audio ${audioCtx ? audioCtx.state : 'none'}${analyser ? (useByte ? ' (byte)' : ' (float)') : ''}  maxEnv ${S.maxEnv.toFixed(5)}`;
 }
 
 /* ---------- status / hud ---------- */
@@ -421,6 +445,15 @@ function step(now, dt) {
     updateBreath(now);
     S.agitation *= Math.pow(0.5, dt / 1.2);
     S.calm = Math.max(0, S.calm - dt * 0.0025);
+    // silent-mic watchdog: mic granted but nothing ever registers
+    if (analyser && !S.paced) {
+      S.maxEnv = Math.max(S.maxEnv, S.env);
+      if (!S.micHintShown && now - S.sessionStart > 15 &&
+          S.maxEnv < Math.max(S.floor * 1.5, 0.0012)) {
+        S.micHintShown = true;
+        setStatus('The lamp can’t hear your breath — bring the phone closer to your face, breathe out through the mouth, or tap ⚙ to watch the meter.', 12);
+      }
+    }
     if (S.paced) {
       const cyc = Math.floor((now - S.sessionStart) / 10);
       if (cyc > S.breaths) { S.breaths = cyc; S.calm = Math.min(1, S.calm + 0.05); }
@@ -447,6 +480,12 @@ async function begin(withMic) {
   $('intro').classList.add('hidden');
   let micOk = false;
   if (withMic) {
+    // iOS Safari: the AudioContext must be created (and resume() called) inside
+    // the tap gesture itself, before any await, or it stays suspended forever
+    try {
+      audioCtx = new (window.AudioContext || window.webkitAudioContext)();
+      audioCtx.resume();
+    } catch (e) { console.warn('audio context:', e.message || e); }
     setStatus('Waiting for microphone permission…');
     try { await initMic(); micOk = true; }
     catch (e) { console.warn('mic unavailable:', e.message || e); }
@@ -469,6 +508,11 @@ async function begin(withMic) {
 
 $('begin-mic').addEventListener('click', () => begin(true));
 $('begin-paced').addEventListener('click', () => begin(false));
+
+// if the context got suspended anyway (screen lock, tab switch), any tap revives it
+document.addEventListener('pointerdown', () => {
+  if (audioCtx && audioCtx.state === 'suspended') audioCtx.resume();
+});
 
 /* ---------- debug wiring ---------- */
 $('gear').addEventListener('click', () => { $('debug').classList.toggle('on'); resize(); });
