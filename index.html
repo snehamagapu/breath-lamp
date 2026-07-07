@@ -97,7 +97,7 @@
   <p class="sub">A flame that lives on your breath.<br>
   Sit comfortably, hold the lamp near — as you would a diya —<br>
   and breathe out slowly toward it.<br>
-  <span style="opacity:.45;font-size:.8em">build 3</span></p>
+  <span style="opacity:.45;font-size:.8em">build 4</span></p>
   <button class="btn" id="begin-mic">Begin</button>
   <button class="btn ghost" id="begin-paced">Begin without microphone</button>
 </div>
@@ -110,6 +110,7 @@
     </label>
     <button id="recal">recalibrate</button>
     <button id="simbtn">hold to breathe (or hold Space)</button>
+    <button id="report">copy report</button>
   </div>
   <div id="stats"></div>
 </div>
@@ -128,7 +129,7 @@ window.addEventListener('unhandledrejection', function (e) {
   if (el) { el.textContent = '⚠ ' + m; el.style.opacity = 1; }
 });
 
-const BUILD = 3;
+const BUILD = 4;
 
 /* ---------- state ---------- */
 const S = {
@@ -146,6 +147,7 @@ const S = {
   simHold: false, simT: 0,
   calSamples: [], calEnd: 0,
   maxEnv: 0, micHintShown: false,
+  events: [], exhalePeak: 0, envLog: [], logTick: 0,
 };
 const on  = () => Math.max(S.floor * 2.2, S.floor + S.mult * S.sd, 0.0012);
 const off = () => S.floor + (on() - S.floor) * 0.45;
@@ -265,13 +267,22 @@ function updateBreath(now) {
     if (S.breath === 'idle' && now - S.aboveSince >= 0.25) {
       S.breath = 'exhale';
       S.breathStart = S.aboveSince;
+      S.exhalePeak = env;
     }
   } else if (env < OFF) {
     S.aboveSince = null;
-    if (S.breath === 'exhale' && now - S.lastAbove > 0.45) {
+    // 0.75s dip tolerance: nasal breath wavers around the threshold mid-exhale
+    if (S.breath === 'exhale' && now - S.lastAbove > 0.75) {
       const dur = S.lastAbove - S.breathStart;
       S.breath = 'idle';
-      if (dur >= 1.2) {
+      const counted = dur >= 1.0;
+      S.events.push({
+        t: +(S.breathStart - S.sessionStart).toFixed(2),
+        dur: +dur.toFixed(2),
+        peak: +S.exhalePeak.toFixed(5),
+        counted
+      });
+      if (counted) {
         S.breaths++;
         S.calm = Math.min(1, S.calm + 0.09 * Math.min(1, (dur - 0.8) / 4.5));
       } else if (dur < 0.6) {
@@ -280,6 +291,7 @@ function updateBreath(now) {
       }
     }
   }
+  if (S.breath === 'exhale') S.exhalePeak = Math.max(S.exhalePeak, env);
   // loud impulse (clap, loud speech) → gutter
   if (S.rms > ON * 5 && S.rms > S.env * 2.5) {
     S.agitation = Math.min(1, S.agitation + 0.25);
@@ -393,7 +405,7 @@ function draw(t) {
 
 /* ---------- debug meter ---------- */
 const hist = new Float32Array(720);
-let histI = 0;
+let histI = 0, statsHoldUntil = 0;
 function drawMeter() {
   hist[histI] = S.env; histI = (histI + 1) % hist.length;
   const mw = meter.width / DPR, mh = meter.height / DPR;
@@ -419,6 +431,7 @@ function drawMeter() {
     i ? mctx.lineTo(x, y) : mctx.moveTo(x, y);
   }
   mctx.stroke();
+  if (performance.now() < statsHoldUntil) return;   // report dump is being shown
   $('stats').textContent =
     `rms ${S.rms.toFixed(5)}  env ${S.env.toFixed(5)}  floor ${S.floor.toFixed(5)}\n` +
     `on ${on().toFixed(5)}  off ${off().toFixed(5)}  state ${S.paced ? 'paced' : S.breath}\n` +
@@ -453,6 +466,11 @@ function step(now, dt) {
     updateBreath(now);
     S.agitation *= Math.pow(0.5, dt / 1.2);
     S.calm = Math.max(0, S.calm - dt * 0.0025);
+    // 10 Hz envelope log for the diagnostic report (capped at ~10 min)
+    if (++S.logTick % 6 === 0) {
+      S.envLog.push(+S.env.toFixed(5));
+      if (S.envLog.length > 6000) S.envLog.shift();
+    }
     // silent-mic watchdog: mic granted but nothing ever registers
     if (analyser && !S.paced) {
       S.maxEnv = Math.max(S.maxEnv, S.env);
@@ -530,6 +548,36 @@ $('mult').addEventListener('input', e => {
 });
 $('recal').addEventListener('click', () => { if (!S.paced) startCalibration(); });
 
+function buildReport() {
+  return JSON.stringify({
+    build: BUILD,
+    ua: navigator.userAgent,
+    audio: audioCtx ? audioCtx.state : 'none',
+    api: analyser ? (useByte ? 'byte' : 'float') : 'none',
+    floor: +S.floor.toFixed(6), sd: +S.sd.toFixed(6), mult: S.mult,
+    on: +on().toFixed(6), off: +off().toFixed(6),
+    maxEnv: +S.maxEnv.toFixed(6),
+    sessionSecs: Math.round(performance.now() / 1000 - S.sessionStart),
+    breaths: S.breaths, calm: +S.calm.toFixed(3),
+    events: S.events,
+    envLog10Hz: S.envLog.slice(-1200)   // last 2 minutes
+  });
+}
+$('report').addEventListener('click', () => {
+  const btn = $('report'), json = buildReport();
+  const ok = () => { btn.textContent = 'copied ✓'; setTimeout(() => { btn.textContent = 'copy report'; }, 2000); };
+  const fail = () => {
+    // clipboard blocked: dump into the stats box for manual copy
+    statsHoldUntil = performance.now() + 60000;
+    $('stats').textContent = json;
+    btn.textContent = 'shown below — long-press to copy';
+    setTimeout(() => { btn.textContent = 'copy report'; }, 4000);
+  };
+  if (navigator.clipboard && navigator.clipboard.writeText) {
+    navigator.clipboard.writeText(json).then(ok, fail);
+  } else fail();
+});
+
 const simBtn = $('simbtn');
 const simOn = e => { e.preventDefault(); S.simHold = true; };
 const simOff = () => { S.simHold = false; };
@@ -540,7 +588,7 @@ window.addEventListener('keydown', e => { if (e.code === 'Space') { e.preventDef
 window.addEventListener('keyup', e => { if (e.code === 'Space') S.simHold = false; });
 
 /* test hook */
-window.__lamp = { S, step, simBreath: v => { S.simHold = !!v; } };
+window.__lamp = { S, step, buildReport, simBreath: v => { S.simHold = !!v; } };
 </script>
 </body>
 </html>
